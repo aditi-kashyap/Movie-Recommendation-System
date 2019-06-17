@@ -1,0 +1,402 @@
+---
+title: "Movie Recommendation"
+author: "Aditi Kashyap"
+date: "6/16/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+INTRODUCTION
+
+The project is a depiction of our understanding of data science using R. In this project, I have developed a machine learning algorithm to develop a movie recommendation system. The dataset used to develop the algorithm is the movieLens dataset.
+
+OVERVIEW/SUMMARY
+
+The movieLens dataset is most often used for the purpose of recommender systems which aim to predict user movie ratings based on other users’ ratings. In other words we expect that users with similar taste will tend to rate movies with high correlation.
+
+In this analysis,first we will try to explore the data. This will give us an idea of the film industry and the movies over a period of time. Hopefully it will give us an interesting insight into the history of cinematography.
+
+This will be followed by writing a machine learning algorithm to develop a movie recommendation system for the users. The accuracy of the recommendation system will be checked using the Root Mean Square Error (RMSE) method.
+
+PACKAGES USED
+
+Most of the packages that were used come from the recommenderlab - a collection of machine learning building algorithm, tidyverse - a collection of packages that share common philosophies of tidy data, ggplot for plots and charts etc. . The tidytext and wordcloud packages were used for some text processing.Also, RSQLite was used to fire queries to the intelligent system for recommendations.
+
+```{r}
+# Load all the required packages
+library(tidyverse)
+library(lubridate)
+library(recommenderlab)
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(DBI)
+library(RSQLite)
+library(stringr)
+library(rvest)
+library(knitr)
+library(XML)
+library(tidytext)
+library(wordcloud)
+library(doParallel)
+set.seed(1234)
+```
+
+DATASET DESCRIPTION
+
+The dataset is available in several snapshots. The ones that were used in this analysis were Latest Datasets - both full and small (for web scraping). 
+
+LOADING THE DATASET
+
+The dataset is split into two files (genome-scores.csv, links.csv, tags.csv and genome-tags.csv were omitted for this analysis)- movies.csv, ratings.csv. The datasets are then joined together using an inner joint to form one dataset. This dataset is then randomly divided into two datasets - 'edx' and 'validation'. 'edx' is our training set whereas validation is our test set.
+
+All exploration and implementation of machine learning algorithm is done on edx dataset henceforth. The 'validation' dataset is only used to derive the prediction.
+Please note that due to using R 3.6.0, the above steps were omitted and an already provided dataset with the assignment by the names 'edx' and 'validation' were used.
+
+``` {r}
+#To load the dataset
+edx <- readRDS("C:/Users/Aditi Kashyap/Documents/projects/Movie Recommendation/edx.rds")
+validation <- readRDS("C:/Users/Aditi Kashyap/Documents/projects/Movie Recommendation/validation.rds")
+```
+DATA CLEANING
+
+In this section we will take the first look at the loaded data frames. We will also perform necessary cleaning and some transformations so that the data better suits our needs. First, let’s look at the ratings table.
+
+``` {r}
+#To get an insight of the dataset
+head(edx)
+head(validation)
+```
+
+In the above, we see that the timestamp column needs to be converted. So we shall convert the timestamp column for both the datasets.
+
+```{r}
+edx <- edx %>%
+  mutate(timestamp = as_datetime(timestamp))
+
+summary(edx)
+
+validation <- validation %>% 
+  mutate(timestamp = as_datetime(timestamp))
+summary(validation)
+```
+
+There are over 40 thousand movies and 3 columns. Most of the movies have their debut year added to their names - we want to extract this into separate columns. Genres columns contains multiple categories per row - we want to have them separated into one category per row.
+The code below will clean up the dataset of empty values.
+
+```{r}
+edx <- edx %>%
+  # trim whitespaces
+  mutate(title = str_trim(title)) %>%
+  # split title to title, year
+  extract(title, c("title_tmp", "year"), regex = "^(.*) \\(([0-9 \\-]*)\\)$", remove = F) %>%
+  # for series take debut date
+  mutate(year = if_else(str_length(year) > 4, as.integer(str_split(year, "-", simplify = T)[1]), as.integer(year))) %>%
+  # replace title NA's with original title
+  mutate(title = if_else(is.na(title_tmp), title, title_tmp)) %>%
+  # drop title_tmp column
+  select(-title_tmp)  %>%
+  # generic function to turn (no genres listed) to NA
+  mutate(genres = if_else(genres == "(no genres listed)", `is.na<-`(genres), genres))
+```
+
+DATA EXPLORATION
+
+Now that our data is clean and ready to be amalyzed, we explore various trends and figures in the data.
+In this part we will try to explore the dataset and reveal some interesting facts about the movie business.
+
+How many movies were produced per year?
+
+The first question that may be asked is how many movies were produced year by year. We can easily extract this information from the movies_df data frame.
+
+```{r}
+# Number of movies per year/decade
+movies_per_year <- edx %>%
+  na.omit() %>% # omit missing values
+  select(movieId, year) %>% # select columns we need
+  group_by(year) %>% # group by year
+  summarise(count = n())  %>% # count movies per year
+  arrange(year)
+
+knitr::kable(head(movies_per_year, 10))
+```
+
+There are some years that are missing, probably there were no movies produced in the early years. We can easily fix missing values using complete() function from the tidyr package.
+
+```{r}
+# fill missing years
+movies_per_year <- movies_per_year %>%
+  complete(year = full_seq(year, 1), fill = list(count = 0))
+
+knitr::kable(head(movies_per_year, 10))
+```
+
+Now we can plot the available data to analyze trends.
+
+```{r}
+movies_per_year %>%
+  ggplot(aes(x = year, y = count)) +
+  geom_line(color="blue")
+```
+
+We can see an exponential growth in the demand for movies. Growing popularity of the Internet must have had a positive impact on the demand for movies. That is certainly something worthy of further analysis.
+
+What were the most popular movie genres year by year?
+
+We know how many movies were produced, but can we check what genres were popular? We might expect that some events in history might have influenced the movie creators to produce specific genres. First we will check what genres are the most popular in general.
+
+```{r}
+#To find the most popular genre
+genres_df <- edx %>%
+  separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarise(number = n()) %>%
+  arrange(desc(number))
+
+knitr::kable(head(genres_df, 10))
+```
+
+We see from the codes above that Drama and Comedy are the most popular genres. So we now sort it by the year.
+
+```{r}
+# Genres popularity per year
+genres_popularity <- edx %>%
+  na.omit() %>% # omit missing values
+  select(movieId, year, genres) %>% # select columns we are interested in
+  separate_rows(genres, sep = "\\|") %>% # separate genres into rows
+  mutate(genres = as.factor(genres)) %>% # turn genres in factors
+  group_by(year, genres) %>% # group data by year and genre
+  summarise(number = n()) %>% # count
+  complete(year = full_seq(year, 1), genres, fill = list(number = 0)) # add missing years/genres
+```
+
+Now we are able to plot the data. For readability we choose 4 genres: animation, sci-fi, war and western movies.
+
+```{r}
+genres_popularity %>%
+  filter(year > 1930) %>%
+  filter(genres %in% c("War", "Sci-Fi", "Animation", "Western")) %>%
+  ggplot(aes(x = year, y = number)) +
+    geom_line(aes(color=genres)) +
+    scale_fill_brewer(palette = "Paired") 
+```
+
+
+Having explored the data sufficiently, we now move on to developing a machine learning algorithm for the same.In the method below, we use the UBCF (User Based Collaborative Filtering) for developing a recommender model and testing it on the validation set.
+
+We start off by pre-processing the data to turn the genre into a matrix format.
+
+```{r}
+# extract the genres into a matrix
+genres <- as.data.frame(edx$genres, stringsAsFactors=FALSE)
+
+genres2 <- as.data.frame(tstrsplit(genres[,1], '[|]', 
+                                   type.convert=TRUE), 
+                         stringsAsFactors=FALSE)
+colnames(genres2) <- c(1:10)
+
+genre_list <- c("Action", "Adventure", "Animation", "Children", 
+                "Comedy", "Crime","Documentary", "Drama", "Fantasy",
+                "Film-Noir", "Horror", "Musical", "Mystery","Romance",
+                "Sci-Fi", "Thriller", "War", "Western") # we have 18 genres in total
+
+genre_matrix <- matrix(0,9126,18) #empty matrix, 10330=no of movies+1, 18=no of genres
+genre_matrix[1,] <- genre_list #set first row to genre list
+colnames(genre_matrix) <- genre_list #set column names to genre list
+
+#iterate through matrix
+for (i in 1:nrow(genres2)) {
+    for (c in 1:ncol(genres2)) {
+        genmat_col = which(genre_matrix[1,] == genres2[i,c])
+        genre_matrix[i+1,genmat_col] <- 1
+    }
+}
+```
+
+We will then convert the the matrix into a dataframe for easier processing.
+```{r}
+#convert into dataframe
+genre_matrix2 <- as.data.frame(genre_matrix[-1,], stringsAsFactors=FALSE) #remove first row, which was the genre list
+for (c in 1:ncol(genre_matrix2)) {
+    genre_matrix2[,c] <- as.integer(genre_matrix2[,c])  #convert from characters to integers
+} 
+
+head(genre_matrix2)
+```
+
+
+In order to carry out a predictive analysis, we need to convert the ratings into boolean values. Ratings over 3 are considered a positive value whereas ratings below 3 are a negative value. This is done to ensure that the machines segregates the movies into either a recommendation or a non0recommendation category.
+
+```{r}
+#get binaryratings matrix in correct format from long to wide format
+#sub non-rated movies for users with 0 in place of NAs
+binaryratings2 <- dcast(binaryratings, movieId~userId, value.var = "rating", na.rm=FALSE)
+for (i in 1:ncol(binaryratings2)){
+    binaryratings2[which(is.na(binaryratings2[,i]) == TRUE),i] <- 0
+}
+binaryratings2 = binaryratings2[,-1] #remove movieIds col. Rows are movieIds, cols are userIds
+```
+
+
+We then remove the redundant data as well as those with partial or missing entires. This is done by using the codes below.
+
+```{r}
+#Remove rows that are not rated from movies dataset
+length(unique(movies$movieId)) #9125
+length(unique(ratings$movieId)) #9066
+movieIds <- unique(movies$movieId) 
+ratingmovieIds <- unique(ratings$movieId)
+movies2 <- movies[-which((movieIds %in% ratingmovieIds) == FALSE),]
+rownames(movies2) <- NULL
+write.csv(movies2,"movies2.csv",row.names=FALSE)
+#Remove rows that are not rated from genre_matrix2
+genre_matrix3 <- genre_matrix2[-which((movieIds %in% ratingmovieIds) == FALSE),]
+rownames(genre_matrix3) <- NULL
+```
+
+We shall then convert the ratings into binary scale for all the users. This will enable us to safely handle the data with ease.
+
+```{r}
+#Calculate dot product for User Profiles
+result = matrix(0,18,671) #binaryratings2 matrix has 9066 rows and 671 cols
+for (c in 1:ncol(binaryratings2)){
+    for (i in 1:ncol(genre_matrix3)){
+        result[i,c] <- sum((genre_matrix3[,i]) * (binaryratings2[,c]))
+    }
+}
+
+#Convert to Binary scale
+for (i in 1:nrow(result)){
+    if (result[i] < 0){
+        result[i] <- 0
+    }
+    else {
+        result[i] <- 1
+    }
+}
+```
+
+We shall then develop a relation between users and the products they have been buying since the start of this data collection for a period of time.
+
+
+```{r}
+result2 <- result[1,] #First user's profile
+sim_mat <- rbind.data.frame(result2, genre_matrix3)
+sim_mat <- data.frame(lapply(sim_mat,function(x){as.integer(x)})) #convert data to type integer
+
+#Calculate Jaccard distance between user profile and all movies
+library(proxy)
+sim_results <- dist(sim_mat, method = "Jaccard")
+sim_results <- as.data.frame(as.matrix(sim_results[1:9066]))
+rows <- which(sim_results == min(sim_results))
+#Recommended movies
+movies[rows,2]
+movies[rows,]
+```
+We then develop a user based collaborative filtering method in order to recommend similar products to customers with similar buying trends.
+
+
+```{r}
+## User based collaborative filtering
+#Create ratings matrix. Rows = userId, Columns = movieId
+ratingmat <- dcast(ratings, userId~movieId, value.var = "rating", na.rm=FALSE)
+ratingmat <- as.matrix(ratingmat[,-1]) #remove userIds
+dim(ratingmat)
+
+#Convert rating matrix into a recommenderlab sparse matrix
+ratingmat <- as(ratingmat, "realRatingMatrix")
+
+#Normalize the data
+ratingmat_norm <- normalize(ratingmat)
+
+#Create Recommender Model. "UBCF" stands for User-Based Collaborative Filtering
+recommender_model <- Recommender(ratingmat_norm, method = "UBCF", param=list(method="Cosine",nn=30))
+recom <- predict(recommender_model, ratingmat[1], n=10) #Obtain top 10 recommendations for 1st user in dataset
+recom_list <- as(recom, "list") #convert recommenderlab object to readable list
+
+#Obtain recommendations
+recom_result <- matrix(0,10)
+for (i in c(1:10)){
+    recom_result[i] <- movies[as.integer(recom_list[[1]][i]),2]
+}
+
+recom_result
+```
+
+We then generate a confusion matrix for the evaluation of the recommender model generated in the codes above.
+```{r}
+###Evaluate
+evaluation_scheme <- evaluationScheme(ratingmat, method="cross-validation", k=5, given=3, goodRating=5) #k=5 meaning a 5-fold cross validation. given=3 meaning a Given-3 protocol
+evaluation_results <- evaluate(evaluation_scheme, method="UBCF", n=c(1,3,5,10,15,20))
+eval_results <- getConfusionMatrix(evaluation_results)[[1]]
+```
+We now implement the recommendation system onto our test set, which is the validation set. The codes for the same are given below.
+
+```{r}
+head(validation)
+
+getData(validation, "train") # training set
+getData(validation, "known") # set with the items used to build the recommendations
+getData(validation, "unknown") # set with the items used to test the recommendations
+
+qplot(rowCounts(getData(validation, "unknown"))) + 
+    geom_histogram(binwidth = 10) + 
+    ggtitle("unknown items by the users")
+
+model_to_evaluate <- "IBCF"
+model_parameters <- NULL
+
+eval_recommender <- Recommender(data = getData(validation, "train"),
+                                method = model_to_evaluate, 
+                                parameter = model_parameters)
+
+items_to_recommend <- 10
+eval_prediction <- predict(object = eval_recommender, 
+                           newdata = getData(validation, "known"), 
+                           n = items_to_recommend, 
+                           type = "ratings")
+
+qplot(rowCounts(eval_prediction)) + 
+    geom_histogram(binwidth = 10) +
+    ggtitle("Distribution of movies per user")
+```
+
+We test the accuracy of the evaluation of the recommendation model by using confusion matrix and through the usage over a period of time. The codes for the same are given below.
+```{r}
+results <- evaluate(x = validation, 
+                    method = model_to_evaluate, 
+                    n = seq(10, 100, 10))
+
+head(getConfusionMatrix(results)[[1]])
+
+eval_accuracy <- calcPredictionAccuracy(x = eval_prediction, 
+                                        data = getData(validation, "unknown"), 
+                                        byUser = TRUE)
+head(eval_accuracy)
+```
+
+Finally, we evaluate the accuracy of the project by deriving the rmse value which we did using the codes below.
+```{r}
+qplot(eval_accuracy[, "RMSE"]) + 
+    geom_histogram(binwidth = 0.1) +
+    ggtitle("Distribution of the RMSE by user")
+
+eval_accuracy <- calcPredictionAccuracy(x = eval_prediction, 
+                                        data = getData(validation, "unknown"), 
+                                        byUser = FALSE) 
+eval_accuracy
+(0.87852) #RMSE value
+```
+
+RESULTS
+
+The above codes brought out some interesting facts about the film industry. Apart from that, the recommender was successfully developed, the accuracy of which was tested using RMSE value which turns out to be 0.87852.
+
+
+CONCLUSION
+
+Analysing the movieLens dataset gave many interesting insights into the movie business. Although it is mainly used for recommendation systems we were still able to extract some trends in the data. With web scraping methods the dataset could be easily entended to provide even more interesting observations. Overall, it was an interesting dataset to analyze that allowed using even more interesting R packages & features.
